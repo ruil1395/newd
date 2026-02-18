@@ -71,9 +71,12 @@ async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
     logger.info(f"Sending to Qwen Code: {prompt[:100]}...")
     
     try:
+        # Use full path to qwen CLI
+        qwen_path = "/home/codespace/nvm/current/bin/qwen"
+        
         # Use qwen CLI with stdin
         proc = await asyncio.create_subprocess_exec(
-            "qwen",
+            qwen_path,
             "--no-sandbox",  # Run without sandbox for Codespaces
             prompt,
             stdin=asyncio.subprocess.PIPE,
@@ -95,10 +98,14 @@ async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
         else:
             error_msg = stderr.decode('utf-8')
             logger.error(f"Qwen CLI error ({proc.returncode}): {error_msg}")
+            # Return partial response even on error
+            partial = stdout.decode('utf-8').strip()
+            if partial:
+                return partial
             return f"Error: {error_msg}"
             
     except FileNotFoundError:
-        logger.warning("qwen CLI not found")
+        logger.warning("qwen CLI not found, trying without full path")
         return None
     except asyncio.TimeoutError:
         logger.error("Qwen CLI timeout (120s)")
