@@ -1,3 +1,17 @@
+# Telegram Bot
 aiogram>=3.0.0
+
+# HTTP client
 aiohttp>=3.8.0
+
+# Environment variables
 python-dotenv>=1.0.0
+
+# Speech-to-Text (OpenAI Whisper API or local)
+openai>=1.0.0
+
+# Audio processing
+pydub>=0.25.0
+
+# For handling voice messages
+ffmpeg-python>=0.2.0
