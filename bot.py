@@ -97,25 +97,46 @@ def load_vosk_model():
 def convert_ogg_to_wav(ogg_data: bytes) -> bytes:
     """Convert OGG audio to WAV format for Vosk."""
     try:
-        # Use pydub for conversion if available
         from pydub import AudioSegment
-        
+
         ogg_buffer = io.BytesIO(ogg_data)
-        audio = AudioSegment.from_file(ogg_buffer, format="ogg")
         
+        # Try different formats
+        audio = None
+        for fmt in ["ogg", "mp3", "wav", "webm"]:
+            try:
+                ogg_buffer.seek(0)
+                audio = AudioSegment.from_file(ogg_buffer, format=fmt)
+                logger.info(f"Audio loaded as {fmt}")
+                break
+            except:
+                continue
+        
+        if audio is None:
+            # Last resort: try without format specification
+            ogg_buffer.seek(0)
+            audio = AudioSegment.from_file(ogg_buffer)
+            logger.info("Audio loaded with auto-detect format")
+
         # Convert to mono 16kHz 16-bit (Vosk requirements)
+        logger.info(f"Original audio: {audio.frame_rate}Hz, {audio.channels} channels, {audio.sample_width} bytes")
         audio = audio.set_channels(1)
         audio = audio.set_frame_rate(16000)
         audio = audio.set_sample_width(2)  # 16-bit
-        
+        logger.info(f"Converted audio: {audio.frame_rate}Hz, {audio.channels} channels, {audio.sample_width} bytes")
+
         wav_buffer = io.BytesIO()
         audio.export(wav_buffer, format="wav")
         wav_buffer.seek(0)
+
+        wav_data = wav_buffer.read()
+        logger.info(f"WAV size: {len(wav_data)} bytes")
+        return wav_data
         
-        return wav_buffer.read()
     except Exception as e:
         logger.exception(f"Error converting audio: {e}")
         # Fallback: return original data
+        logger.warning("Returning original data without conversion")
         return ogg_data
 
 
@@ -124,49 +145,74 @@ async def speech_to_text(audio_bytes: bytes) -> Optional[str]:
     Convert speech audio bytes to text using Vosk (offline, free).
     """
     global vosk_model
-    
+
+    logger.info(f"STT: Received {len(audio_bytes)} bytes of audio data")
+
     if vosk_model is None:
+        logger.warning("STT: Model not loaded, attempting to load...")
         vosk_model = load_vosk_model()
-    
+
     if vosk_model is None:
+        logger.error("STT: Failed to load model")
         return None
-    
+
     try:
         # Convert OGG to WAV
+        logger.info("STT: Converting OGG to WAV...")
         wav_data = convert_ogg_to_wav(audio_bytes)
-        wav_buffer = io.BytesIO(wav_data)
+        logger.info(f"STT: Converted to {len(wav_data)} bytes WAV")
         
+        wav_buffer = io.BytesIO(wav_data)
+
         # Open WAV file
         with wave.open(wav_buffer, "rb") as wf:
             # Check audio properties
             sample_rate = wf.getframerate()
-            
+            n_frames = wf.getnframes()
+            duration = n_frames / sample_rate if sample_rate > 0 else 0
+            logger.info(f"STT: WAV properties - {sample_rate}Hz, {n_frames} frames, {duration:.2f}s")
+
             # Create recognizer
             recognizer = KaldiRecognizer(vosk_model, sample_rate)
-            
+            recognizer.SetWords(True)  # Enable word-level timestamps
+
             # Process audio in chunks
             text_parts = []
+            chunk_num = 0
             while True:
                 data = wf.readframes(4000)
                 if len(data) == 0:
                     break
-                
+                chunk_num += 1
+
                 if recognizer.AcceptWaveform(data):
                     result = json.loads(recognizer.Result())
                     if result.get("text"):
+                        logger.info(f"STT: Partial result: {result['text']}")
                         text_parts.append(result["text"])
-            
+                else:
+                    # Get partial results
+                    partial = json.loads(recognizer.PartialResult())
+                    if partial.get("partial"):
+                        logger.debug(f"STT: Partial: {partial['partial']}")
+
             # Get final result
+            logger.info("STT: Getting final result...")
             final_result = json.loads(recognizer.FinalResult())
             if final_result.get("text"):
+                logger.info(f"STT: Final result: {final_result['text']}")
                 text_parts.append(final_result["text"])
-            
+            else:
+                logger.warning("STT: No text recognized in final result")
+
             full_text = " ".join(text_parts).strip()
-            logger.info(f"STT result: {full_text}")
+            logger.info(f"STT: Complete text: '{full_text}'")
             return full_text if full_text else None
-            
+
     except Exception as e:
-        logger.exception(f"Error in speech-to-text: {e}")
+        logger.exception(f"STT: Error during recognition: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

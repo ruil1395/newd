@@ -14,11 +14,11 @@ import logging
 import os
 import signal
 import sys
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,7 +26,7 @@ load_dotenv()
 # Configuration
 QUEUE_DIR = Path(os.getenv("QUEUE_DIR", "/tmp/qwen_queue"))
 RESPONSES_DIR = Path(os.getenv("RESPONSES_DIR", "/tmp/qwen_responses"))
-QWEN_CODE_API_URL = os.getenv("QWEN_CODE_API_URL", "")  # Optional: direct API
+QWEN_CODE_API_URL = os.getenv("QWEN_CODE_API_URL", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
 
 # Create directories
@@ -54,17 +54,73 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
+async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Process request using Qwen Code CLI.
+    """
+    prompt = request_data.get("prompt", "")
+    history = request_data.get("history", [])
+    
+    # Build context from history
+    context = ""
+    for msg in history[-5:]:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        context += f"{role}: {content}\n"
+    
+    logger.info(f"Sending to Qwen Code: {prompt[:100]}...")
+    
+    try:
+        # Use qwen CLI with stdin
+        proc = await asyncio.create_subprocess_exec(
+            "qwen",
+            "--no-sandbox",  # Run without sandbox for Codespaces
+            prompt,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Send context via stdin if available
+        stdin_data = context.encode('utf-8') if context else None
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=stdin_data),
+            timeout=120
+        )
+        
+        if proc.returncode == 0:
+            response = stdout.decode('utf-8').strip()
+            logger.info(f"Qwen Code response received ({len(response)} chars)")
+            return response
+        else:
+            error_msg = stderr.decode('utf-8')
+            logger.error(f"Qwen CLI error ({proc.returncode}): {error_msg}")
+            return f"Error: {error_msg}"
+            
+    except FileNotFoundError:
+        logger.warning("qwen CLI not found")
+        return None
+    except asyncio.TimeoutError:
+        logger.error("Qwen CLI timeout (120s)")
+        return "⏱ Превышено время ожидания ответа от Qwen Code"
+    except Exception as e:
+        logger.exception(f"Error in subprocess: {e}")
+        return None
+
+
 async def process_with_qwen_api(request_data: Dict[str, Any]) -> Optional[str]:
     """Process request using direct Qwen Code API (if configured)."""
     if not QWEN_CODE_API_URL:
         return None
+    
+    import aiohttp
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 QWEN_CODE_API_URL,
                 json=request_data,
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=120)
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -77,77 +133,31 @@ async def process_with_qwen_api(request_data: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-async def process_with_subprocess(request_data: Dict[str, Any]) -> Optional[str]:
-    """
-    Process request by calling Qwen Code CLI.
-    
-    This is a placeholder - adjust based on your Qwen Code setup.
-    """
-    prompt = request_data.get("prompt", "")
-    history = request_data.get("history", [])
-    
-    # Build context from history
-    context = ""
-    for msg in history[-5:]:  # Last 5 messages
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        context += f"{role}: {content}\n"
-    
-    # Create a temporary file with the prompt
-    import tempfile
-    
-    try:
-        # Example: call qwen-code CLI if available
-        # Adjust this based on your actual Qwen Code installation
-        proc = await asyncio.create_subprocess_exec(
-            "qwen-code",  # or full path to CLI
-            "--prompt", prompt,
-            "--context", context,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-        
-        if proc.returncode == 0:
-            return stdout.decode('utf-8').strip()
-        else:
-            logger.error(f"Qwen CLI error: {stderr.decode('utf-8')}")
-            return None
-            
-    except FileNotFoundError:
-        logger.warning("qwen-code CLI not found, using mock response")
-        return generate_mock_response(prompt)
-    except asyncio.TimeoutError:
-        logger.error("Qwen CLI timeout")
-        return None
-    except Exception as e:
-        logger.exception(f"Error in subprocess: {e}")
-        return None
-
-
-def generate_mock_response(prompt: str) -> str:
+def generate_mock_response(request_data: Dict[str, Any]) -> str:
     """
     Generate a mock response for testing.
-    Replace this with actual Qwen Code integration.
     """
-    return f"""[Qwen Code Response]
+    prompt = request_data.get("prompt", "")
+    
+    return f"""🤖 **Qwen Code (тестовый режим)**
 
-Получен запрос: {prompt}
-
-Это демонстрационный ответ. Для реальной работы настройте интеграцию:
-
-1. **Вариант A: Direct API**
-   Установите QWEN_CODE_API_URL в .env
-   
-2. **Вариант B: CLI**
-   Установите qwen-code CLI: npm install -g @qwen-code/qwen-code
-
-3. **Вариант C: Custom processor**
-   Отредактируйте queue_processor.py и добавьте свою логику
+Получен ваш запрос:
+> {prompt}
 
 ---
-Запрос обработан в: {datetime.now().isoformat()}
+
+Это демонстрационный ответ. Для реальной работы:
+
+**Вариант 1: Qwen Code CLI**
+```bash
+npm install -g @qwen-code/qwen-code
+```
+
+**Вариант 2: API**
+Установите `QWEN_CODE_API_URL` в `.env`
+
+---
+*Запрос обработан: {datetime.now().strftime('%H:%M:%S')}*
 """
 
 
@@ -160,21 +170,34 @@ async def process_request(request_file: Path):
         with open(request_file, "r", encoding="utf-8") as f:
             request_data = json.load(f)
         
-        logger.info(f"Processing request {request_id} from user {request_data.get('user_id')}")
+        user_id = request_data.get("user_id", "unknown")
+        prompt = request_data.get("prompt", "")
         
-        # Process with Qwen Code (try API first, then CLI, then mock)
-        response_text = await process_with_qwen_api(request_data)
+        logger.info(f"📥 Processing request {request_id} from user {user_id}")
+        logger.info(f"   Prompt: {prompt[:50]}...")
         
+        # Try different methods in order
+        response_text = None
+        
+        # 1. Try CLI first
+        if response_text is None:
+            logger.info("   Trying Qwen Code CLI...")
+            response_text = await process_with_qwen_cli(request_data)
+        
+        # 2. Try API
+        if not response_text and QWEN_CODE_API_URL:
+            logger.info("   Trying Qwen Code API...")
+            response_text = await process_with_qwen_api(request_data)
+        
+        # 3. Fallback to mock
         if not response_text:
-            response_text = await process_with_subprocess(request_data)
-        
-        if not response_text:
-            response_text = generate_mock_response(request_data.get("prompt", ""))
+            logger.info("   Using mock response (no Qwen available)")
+            response_text = generate_mock_response(request_data)
         
         # Write response
         response_data = {
             "id": request_id,
-            "user_id": request_data.get("user_id"),
+            "user_id": user_id,
             "response": response_text,
             "timestamp": datetime.now().isoformat(),
             "status": "completed"
@@ -184,16 +207,17 @@ async def process_request(request_file: Path):
         with open(response_file, "w", encoding="utf-8") as f:
             json.dump(response_data, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"Response written for request {request_id}")
+        logger.info(f"✅ Response written for request {request_id}")
         
         # Clean up request file
         try:
             request_file.unlink()
+            logger.info(f"   Cleaned up request file")
         except:
             pass
             
     except Exception as e:
-        logger.exception(f"Error processing request {request_id}: {e}")
+        logger.exception(f"❌ Error processing request {request_id}: {e}")
         
         # Write error response
         error_data = {
@@ -213,13 +237,20 @@ async def process_request(request_file: Path):
 
 async def monitor_queue():
     """Monitor queue directory and process requests."""
-    logger.info(f"Queue processor started")
+    logger.info("=" * 50)
+    logger.info("Qwen Code Queue Processor Started")
+    logger.info("=" * 50)
     logger.info(f"Queue directory: {QUEUE_DIR}")
     logger.info(f"Responses directory: {RESPONSES_DIR}")
+    logger.info(f"Poll interval: {POLL_INTERVAL}s")
+    logger.info("=" * 50)
     
     while running:
         # Find all request files
         request_files = list(QUEUE_DIR.glob("*.json"))
+        
+        if request_files:
+            logger.info(f"📋 Found {len(request_files)} pending request(s)")
         
         for request_file in request_files:
             if not running:
@@ -233,10 +264,6 @@ async def monitor_queue():
 
 
 async def main():
-    logger.info("=" * 50)
-    logger.info("Qwen Code Queue Processor")
-    logger.info("=" * 50)
-    
     try:
         await monitor_queue()
     except Exception as e:
