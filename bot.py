@@ -1,10 +1,11 @@
 """
 Telegram Bot for Voice-Controlled Qwen Code with Feedback System
+FREE VERSION - No OpenAI API, uses Vosk STT and file-based queue
 
 Features:
 1. Receive voice messages from Telegram
-2. Convert speech to text (STT) using OpenAI Whisper API
-3. Send text as prompt to Qwen Code
+2. Convert speech to text using Vosk (free, offline)
+3. Send text as prompt to Qwen Code via file queue
 4. Return response from Qwen Code to user
 5. Collect feedback (rating, comment, clarification)
 """
@@ -13,9 +14,12 @@ import asyncio
 import logging
 import os
 import io
-import tempfile
-from typing import Optional, Dict, Any
+import json
+import uuid
+import wave
+from pathlib import Path
 from datetime import datetime
+from typing import Optional, Dict, Any
 
 import aiohttp
 from dotenv import load_dotenv
@@ -27,18 +31,27 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton,
-    FSInputFile, InputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
+
+# Vosk imports
+from vosk import Model, KaldiRecognizer
 
 # Load environment variables
 load_dotenv()
 
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # For Whisper STT
-QWEN_CODE_API_URL = os.getenv("QWEN_CODE_API_URL", "http://localhost:8080/api")
+
+# Paths for file-based queue
+QUEUE_DIR = Path(os.getenv("QUEUE_DIR", "/tmp/qwen_queue"))
+RESPONSES_DIR = Path(os.getenv("RESPONSES_DIR", "/tmp/qwen_responses"))
+VOSK_MODEL_PATH = Path(os.getenv("VOSK_MODEL_PATH", "./vosk-model-ru"))
+
+# Create directories
+QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
 
 if not BOT_TOKEN:
     raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables")
@@ -54,106 +67,202 @@ logger = logging.getLogger(__name__)
 user_conversations: Dict[int, list] = {}
 # Store pending feedback data
 pending_feedback: Dict[int, Dict[str, Any]] = {}
-
-# ---------- States ----------
-class FeedbackStates(StatesGroup):
-    waiting_for_rating = State()
-    waiting_for_comment = State()
-    waiting_for_clarification = State()
+# Vosk model (loaded once)
+vosk_model: Optional[Model] = None
 
 
-# ---------- Speech-to-Text (OpenAI Whisper) ----------
-async def speech_to_text(audio_bytes: bytes) -> Optional[str]:
-    """
-    Convert speech audio bytes to text using OpenAI Whisper API.
-    """
-    if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY not set, STT will not work")
+# ---------- Vosk Speech-to-Text ----------
+def load_vosk_model():
+    """Load Vosk model for Russian speech recognition."""
+    global vosk_model
+    model_path = VOSK_MODEL_PATH
+    
+    if not model_path.exists():
+        logger.error(f"Vosk model not found at {model_path}")
+        logger.error("Please download the model:")
+        logger.error("  wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip")
+        logger.error("  unzip vosk-model-small-ru-0.22.zip")
+        logger.error("  mv vosk-model-small-ru-0.22 ./vosk-model-ru")
+        return None
+    
+    try:
+        vosk_model = Model(str(model_path))
+        logger.info(f"Vosk model loaded from {model_path}")
+        return vosk_model
+    except Exception as e:
+        logger.exception(f"Error loading Vosk model: {e}")
         return None
 
-    url = "https://api.openai.com/v1/audio/transcriptions"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-    }
 
-    # Create form data with audio file
-    data = aiohttp.FormData()
-    data.add_field(
-        'file',
-        audio_bytes,
-        filename='voice.ogg',
-        content_type='audio/ogg'
-    )
-    data.add_field('model', 'whisper-1')
-    data.add_field('language', 'ru')  # Default to Russian
-
+def convert_ogg_to_wav(ogg_data: bytes) -> bytes:
+    """Convert OGG audio to WAV format for Vosk."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=data) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    text = result.get('text', '').strip()
-                    logger.info(f"STT result: {text}")
-                    return text
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"STT API error: {resp.status} - {error_text}")
-                    return None
+        # Use pydub for conversion if available
+        from pydub import AudioSegment
+        
+        ogg_buffer = io.BytesIO(ogg_data)
+        audio = AudioSegment.from_file(ogg_buffer, format="ogg")
+        
+        # Convert to mono 16kHz 16-bit (Vosk requirements)
+        audio = audio.set_channels(1)
+        audio = audio.set_frame_rate(16000)
+        audio = audio.set_sample_width(2)  # 16-bit
+        
+        wav_buffer = io.BytesIO()
+        audio.export(wav_buffer, format="wav")
+        wav_buffer.seek(0)
+        
+        return wav_buffer.read()
+    except Exception as e:
+        logger.exception(f"Error converting audio: {e}")
+        # Fallback: return original data
+        return ogg_data
+
+
+async def speech_to_text(audio_bytes: bytes) -> Optional[str]:
+    """
+    Convert speech audio bytes to text using Vosk (offline, free).
+    """
+    global vosk_model
+    
+    if vosk_model is None:
+        vosk_model = load_vosk_model()
+    
+    if vosk_model is None:
+        return None
+    
+    try:
+        # Convert OGG to WAV
+        wav_data = convert_ogg_to_wav(audio_bytes)
+        wav_buffer = io.BytesIO(wav_data)
+        
+        # Open WAV file
+        with wave.open(wav_buffer, "rb") as wf:
+            # Check audio properties
+            sample_rate = wf.getframerate()
+            
+            # Create recognizer
+            recognizer = KaldiRecognizer(vosk_model, sample_rate)
+            
+            # Process audio in chunks
+            text_parts = []
+            while True:
+                data = wf.readframes(4000)
+                if len(data) == 0:
+                    break
+                
+                if recognizer.AcceptWaveform(data):
+                    result = json.loads(recognizer.Result())
+                    if result.get("text"):
+                        text_parts.append(result["text"])
+            
+            # Get final result
+            final_result = json.loads(recognizer.FinalResult())
+            if final_result.get("text"):
+                text_parts.append(final_result["text"])
+            
+            full_text = " ".join(text_parts).strip()
+            logger.info(f"STT result: {full_text}")
+            return full_text if full_text else None
+            
     except Exception as e:
         logger.exception(f"Error in speech-to-text: {e}")
         return None
 
 
-# ---------- Qwen Code API Integration ----------
+# ---------- File Queue Integration ----------
 async def send_to_qwen_code(prompt: str, user_id: int) -> Optional[str]:
     """
-    Send prompt to Qwen Code API and get response.
+    Send prompt to Qwen Code via file queue and wait for response.
+    
+    File queue mechanism:
+    1. Create request file in QUEUE_DIR
+    2. Wait for response file in RESPONSES_DIR
+    3. Return response content
     """
     # Get conversation history for context
     history = user_conversations.get(user_id, [])
-
-    payload = {
+    
+    # Create unique request ID
+    request_id = str(uuid.uuid4())
+    
+    # Create request payload
+    request_data = {
+        "id": request_id,
+        "user_id": user_id,
         "prompt": prompt,
         "history": history[-10:],  # Last 10 messages for context
         "timestamp": datetime.now().isoformat()
     }
-
+    
+    # Write request file
+    request_file = QUEUE_DIR / f"{request_id}.json"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                QWEN_CODE_API_URL,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    response_text = result.get('response', result.get('answer', str(result)))
-
-                    # Store in conversation history
-                    if user_id not in user_conversations:
-                        user_conversations[user_id] = []
-                    user_conversations[user_id].append({
-                        "role": "user",
-                        "content": prompt,
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    user_conversations[user_id].append({
-                        "role": "assistant",
-                        "content": response_text,
-                        "timestamp": datetime.now().isoformat()
-                    })
-
-                    return response_text
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"Qwen Code API error: {resp.status} - {error_text}")
-                    return None
-    except aiohttp.ClientError as e:
-        logger.exception(f"Network error calling Qwen Code: {e}")
-        return None
+        with open(request_file, "w", encoding="utf-8") as f:
+            json.dump(request_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"Request {request_id} written to queue")
     except Exception as e:
-        logger.exception(f"Error calling Qwen Code: {e}")
+        logger.exception(f"Error writing request file: {e}")
         return None
+    
+    # Wait for response (polling)
+    response_file = RESPONSES_DIR / f"{request_id}.json"
+    max_wait = 60  # Maximum wait time in seconds
+    poll_interval = 1  # Poll every second
+    waited = 0
+    
+    while waited < max_wait:
+        await asyncio.sleep(poll_interval)
+        waited += poll_interval
+        
+        if response_file.exists():
+            try:
+                # Read response
+                with open(response_file, "r", encoding="utf-8") as f:
+                    response_data = json.load(f)
+                
+                response_text = response_data.get("response", response_data.get("answer", ""))
+                
+                # Clean up response file
+                try:
+                    response_file.unlink()
+                except:
+                    pass
+                
+                # Store in conversation history
+                if user_id not in user_conversations:
+                    user_conversations[user_id] = []
+                user_conversations[user_id].append({
+                    "role": "user",
+                    "content": prompt,
+                    "timestamp": datetime.now().isoformat()
+                })
+                user_conversations[user_id].append({
+                    "role": "assistant",
+                    "content": response_text,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                # Clean up request file
+                try:
+                    request_file.unlink()
+                except:
+                    pass
+                
+                logger.info(f"Response received for request {request_id}")
+                return response_text
+                
+            except Exception as e:
+                logger.exception(f"Error reading response file: {e}")
+                return None
+    
+    # Timeout - clean up request file
+    logger.warning(f"Timeout waiting for response {request_id}")
+    try:
+        request_file.unlink()
+    except:
+        pass
+    return None
 
 
 # ---------- Feedback System ----------
@@ -218,11 +327,12 @@ async def cmd_start(message: types.Message):
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "🤖 Я бот для голосового управления **Qwen Code**.\n\n"
         "🎯 **Возможности:**\n"
-        "• 🎤 Отправляй голосовые сообщения — я преобразую их в текст и отправлю в Qwen Code\n"
+        "• 🎤 Отправляй голосовые сообщения — я преобразую их в текст (Vosk STT)\n"
         "• 📝 Или пиши текстовые запросы напрямую\n"
         "• ⭐ Оценивай ответы и оставляй комментарии\n"
         "• 📊 Просматривай историю диалогов\n\n"
-        "🚀 **Начни с отправки голосового сообщения!**",
+        "🚀 **Начни с отправки голосового сообщения!**\n\n"
+        "💡 *Все компоненты бесплатные и работают локально*",
         reply_markup=get_main_keyboard(),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -238,7 +348,8 @@ async def cmd_help(message: types.Message):
 • Нажмите и удерживайте кнопку микрофона в Telegram
 • Скажите ваш запрос для Qwen Code
 • Отправьте сообщение
-• Я преобразую голос в текст и отправлю в Qwen Code
+• Я преобразую голос в текст (Vosk, бесплатно)
+• Отправлю запрос в Qwen Code через файл-очередь
 • Получите ответ и сможете оценить его
 
 **2. Текстовые запросы:**
@@ -257,6 +368,7 @@ async def cmd_help(message: types.Message):
 /history — История диалогов
 /clear — Очистить историю
 /settings — Настройки
+/status — Статус системы
 """
     await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -271,7 +383,7 @@ async def cmd_history(message: types.Message):
         await message.answer("📭 История пуста. Начните диалог с голосового или текстового запроса!")
         return
 
-    # Show last 5 exchanges
+    # Show last 10 exchanges
     recent = history[-10:]
     lines = ["📊 **История диалога:**\n"]
 
@@ -304,14 +416,41 @@ async def cmd_settings(message: types.Message):
 ⚙️ **Настройки:**
 
 • История сообщений: {history_count}
-• STT язык: Русский
-• Модель STT: Whisper-1
+• STT язык: Русский (Vosk)
+• Модель STT: {VOSK_MODEL_PATH.name}
+• Очередь: {QUEUE_DIR}
 
 **Изменить настройки:**
-• /language — изменить язык распознавания
 • /clear — очистить историю
+• /status — статус системы
 """
     await message.answer(settings_text, parse_mode=ParseMode.MARKDOWN)
+
+
+# Status command
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    """Check system status."""
+    status_lines = ["🔍 **Статус системы:**\n"]
+    
+    # Check Vosk model
+    if vosk_model is not None:
+        status_lines.append("✅ Vosk модель: загружена")
+    elif VOSK_MODEL_PATH.exists():
+        status_lines.append("⚠️ Vosk модель: файл есть, не загружена")
+    else:
+        status_lines.append("❌ Vosk модель: не найдена")
+    
+    # Check queue directories
+    queue_count = len(list(QUEUE_DIR.glob("*.json")))
+    response_count = len(list(RESPONSES_DIR.glob("*.json")))
+    status_lines.append(f"📁 Очередь запросов: {queue_count} файлов")
+    status_lines.append(f"📁 Очередь ответов: {response_count} файлов")
+    
+    # Bot info
+    status_lines.append(f"🤖 Бот: @{(await bot.get_me()).username}")
+    
+    await message.answer("\n".join(status_lines), parse_mode=ParseMode.MARKDOWN)
 
 
 # Handle voice messages
@@ -340,13 +479,13 @@ async def handle_voice(message: types.Message):
         return
 
     # Convert speech to text
-    status_msg = await message.answer("🎤 Распознаю голос...")
+    status_msg = await message.answer("🎤 Распознаю голос (Vosk)...")
 
     try:
         text = await speech_to_text(audio_data)
 
         if not text:
-            await status_msg.edit_text("❌ Не удалось распознать голос. Попробуйте ещё раз или отправьте текстом.")
+            await status_msg.edit_text("❌ Не удалось распознать голос. Попробуйте ещё раз или отправьте текстом.\n\nУбедитесь, что модель Vosk загружена (/status)")
             return
 
         await status_msg.edit_text(f"📝 Распознано: _{text}_", parse_mode=ParseMode.MARKDOWN)
@@ -356,14 +495,14 @@ async def handle_voice(message: types.Message):
         await status_msg.edit_text("❌ Ошибка при распознавании речи.")
         return
 
-    # Send to Qwen Code
-    await status_msg.edit_text("🤖 Отправляю в Qwen Code...")
+    # Send to Qwen Code via file queue
+    await status_msg.edit_text("🤖 Отправляю в Qwen Code (файл-очередь)...")
 
     try:
         response = await send_to_qwen_code(text, user_id)
 
         if not response:
-            await status_msg.edit_text("❌ Ошибка при получении ответа от Qwen Code. Попробуйте позже.")
+            await status_msg.edit_text("❌ Ошибка при получении ответа от Qwen Code. Проверьте, что обработчик очереди запущен.\n\nОчередь: `/tmp/qwen_queue`")
             return
 
         # Send response
@@ -407,7 +546,7 @@ async def handle_text(message: types.Message):
         response = await send_to_qwen_code(text, user_id)
 
         if not response:
-            await status_msg.edit_text("❌ Ошибка при получении ответа от Qwen Code. Попробуйте позже.")
+            await status_msg.edit_text("❌ Ошибка при получении ответа от Qwen Code.")
             return
 
         await status_msg.delete()
@@ -456,6 +595,10 @@ async def process_rating(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "feedback_comment")
 async def process_comment_request(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id in pending_feedback:
+        pending_feedback[user_id]["comment_requested"] = True
+    
     await callback.message.answer(
         "📝 Напишите ваш комментарий (или отправьте голосовым):"
     )
@@ -492,23 +635,25 @@ async def process_feedback_done(callback: types.CallbackQuery):
 
 
 # Handle clarification messages
-@dp.message(F.text, FeedbackStates.waiting_for_clarification)
+@dp.message(F.text)
 async def process_clarification_text(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     clarification = message.text
 
-    # Send clarification to Qwen Code
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    # Check if in clarification mode
+    if user_id in pending_feedback and pending_feedback[user_id].get("clarification_requested"):
+        # Send clarification to Qwen Code
+        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
-    # Get original context
-    original_prompt = ""
-    original_response = ""
-    if user_id in pending_feedback:
-        original_prompt = pending_feedback[user_id].get("prompt", "")
-        original_response = pending_feedback[user_id].get("response", "")
+        # Get original context
+        original_prompt = ""
+        original_response = ""
+        if user_id in pending_feedback:
+            original_prompt = pending_feedback[user_id].get("prompt", "")
+            original_response = pending_feedback[user_id].get("response", "")
 
-    # Build clarification prompt
-    full_prompt = f"""
+        # Build clarification prompt
+        full_prompt = f"""
 Original request: {original_prompt}
 Original response: {original_response}
 
@@ -517,33 +662,24 @@ User clarification question: {clarification}
 Please provide a more detailed or clarified answer.
 """
 
-    response = await send_to_qwen_code(full_prompt, user_id)
+        response = await send_to_qwen_code(full_prompt, user_id)
 
-    if response:
-        await message.answer(
-            f"🤖 **Уточнённый ответ:**\n\n{response}",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await request_feedback(message, response)
-    else:
-        await message.answer("❌ Ошибка при получении уточнённого ответа.")
+        if response:
+            await message.answer(
+                f"🤖 **Уточнённый ответ:**\n\n{response}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await request_feedback(message, response)
+        else:
+            await message.answer("❌ Ошибка при получении уточнённого ответа.")
+        return
 
-    await state.clear()
-
-
-# Handle comment messages
-@dp.message(F.text)
-async def process_comment_text(message: types.Message):
-    user_id = message.from_user.id
-    comment = message.text
-
-    # Check if user is in feedback mode
+    # Check if in comment mode
     if user_id in pending_feedback and pending_feedback[user_id].get("comment_requested"):
-        pending_feedback[user_id]["comment"] = comment
+        pending_feedback[user_id]["comment"] = clarification
         pending_feedback[user_id]["comment_timestamp"] = datetime.now().isoformat()
 
-        logger.info(f"User {user_id} left comment: {comment}")
-
+        logger.info(f"User {user_id} left comment: {clarification}")
         await message.answer("✅ Спасибо за ваш комментарий!")
 
         # Clear pending
@@ -580,9 +716,30 @@ async def handle_voice_comment(message: types.Message):
     await handle_voice(message)
 
 
+# ---------- Queue Monitor (optional background task) ----------
+async def queue_monitor():
+    """Background task to monitor queue status."""
+    while True:
+        await asyncio.sleep(60)  # Check every minute
+        queue_count = len(list(QUEUE_DIR.glob("*.json")))
+        if queue_count > 0:
+            logger.info(f"Queue status: {queue_count} pending requests")
+
+
 # ---------- Main ----------
 async def main():
-    logger.info("Starting Qwen Code Voice Bot...")
+    logger.info("Starting Qwen Code Voice Bot (FREE VERSION)...")
+    logger.info(f"Vosk model path: {VOSK_MODEL_PATH}")
+    logger.info(f"Queue directory: {QUEUE_DIR}")
+    logger.info(f"Responses directory: {RESPONSES_DIR}")
+    
+    # Load Vosk model
+    load_vosk_model()
+    
+    # Start queue monitor
+    asyncio.create_task(queue_monitor())
+    
+    logger.info("Bot is running...")
     await dp.start_polling(bot)
 
 
