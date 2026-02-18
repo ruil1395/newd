@@ -1,5 +1,5 @@
 """
-Telegram Bot for Voice-Controlled Qwen Code with Feedback System
+Telegram Bot for Voice-Controlled Qwen Code
 FREE VERSION - No OpenAI API, uses Vosk STT and file-based queue
 
 Features:
@@ -7,7 +7,6 @@ Features:
 2. Convert speech to text using Vosk (free, offline)
 3. Send text as prompt to Qwen Code via file queue
 4. Return response from Qwen Code to user
-5. Collect feedback (rating, comment, clarification)
 """
 
 import asyncio
@@ -21,18 +20,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-import aiohttp
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.enums import ParseMode
 
 # Vosk imports
@@ -65,8 +57,6 @@ logger = logging.getLogger(__name__)
 # ---------- Global Storage ----------
 # Store conversation history per user
 user_conversations: Dict[int, list] = {}
-# Store pending feedback data
-pending_feedback: Dict[int, Dict[str, Any]] = {}
 # Vosk model (loaded once)
 vosk_model: Optional[Model] = None
 
@@ -311,42 +301,6 @@ async def send_to_qwen_code(prompt: str, user_id: int) -> Optional[str]:
     return None
 
 
-# ---------- Feedback System ----------
-async def request_feedback(message: types.Message, response_text: str):
-    """
-    Request feedback from user after receiving Qwen Code response.
-    """
-    user_id = message.from_user.id
-
-    # Store pending response for feedback
-    pending_feedback[user_id] = {
-        "response": response_text,
-        "timestamp": datetime.now().isoformat(),
-        "prompt": user_conversations.get(user_id, [])[-1]["content"] if user_conversations.get(user_id) else ""
-    }
-
-    # Create feedback keyboard
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="⭐⭐⭐⭐⭐", callback_data="rating_5")
-    keyboard.button(text="⭐⭐⭐⭐", callback_data="rating_4")
-    keyboard.button(text="⭐⭐⭐", callback_data="rating_3")
-    keyboard.button(text="⭐⭐", callback_data="rating_2")
-    keyboard.button(text="⭐", callback_data="rating_1")
-    keyboard.adjust(5)
-
-    keyboard.button(text="💬 Оставить комментарий", callback_data="feedback_comment")
-    keyboard.button(text="❓ Уточнить ответ", callback_data="feedback_clarify")
-    keyboard.button(text="✅ Готово, спасибо!", callback_data="feedback_done")
-    keyboard.adjust(3)
-
-    await message.answer(
-        "📊 **Оцените ответ:**\n\n"
-        "Нажмите на звёзды для оценки или выберите другой вариант:",
-        reply_markup=keyboard.as_markup(),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-
 # ---------- Telegram Bot Initialization ----------
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
@@ -375,7 +329,6 @@ async def cmd_start(message: types.Message):
         "🎯 **Возможности:**\n"
         "• 🎤 Отправляй голосовые сообщения — я преобразую их в текст (Vosk STT)\n"
         "• 📝 Или пиши текстовые запросы напрямую\n"
-        "• ⭐ Оценивай ответы и оставляй комментарии\n"
         "• 📊 Просматривай историю диалогов\n\n"
         "🚀 **Начни с отправки голосового сообщения!**\n\n"
         "💡 *Все компоненты бесплатные и работают локально*",
@@ -447,8 +400,6 @@ async def cmd_clear(message: types.Message):
     user_id = message.from_user.id
     if user_id in user_conversations:
         del user_conversations[user_id]
-    if user_id in pending_feedback:
-        del pending_feedback[user_id]
     await message.answer("🗑 История диалогов очищена!")
 
 
@@ -558,9 +509,6 @@ async def handle_voice(message: types.Message):
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Request feedback
-        await request_feedback(message, response)
-
     except Exception as e:
         logger.exception(f"Error getting Qwen response: {e}")
         await status_msg.edit_text("❌ Ошибка при обработке запроса.")
@@ -601,165 +549,9 @@ async def handle_text(message: types.Message):
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Request feedback
-        await request_feedback(message, response)
-
     except Exception as e:
         logger.exception(f"Error getting Qwen response: {e}")
         await status_msg.edit_text("❌ Ошибка при обработке запроса.")
-
-
-# Feedback callback handlers
-@dp.callback_query(F.data.startswith("rating_"))
-async def process_rating(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    rating = callback.data.split("_")[1]
-
-    # Store rating
-    if user_id in pending_feedback:
-        pending_feedback[user_id]["rating"] = int(rating)
-        pending_feedback[user_id]["rating_timestamp"] = datetime.now().isoformat()
-
-    # Log feedback
-    logger.info(f"User {user_id} rated: {rating} stars")
-
-    # Update message
-    stars = "⭐" * int(rating)
-    await callback.message.edit_text(f"✅ Спасибо за оценку: {stars}")
-
-    # Offer to leave a comment
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="💬 Оставить комментарий", callback_data="feedback_comment")
-    keyboard.button(text="✅ Готово!", callback_data="feedback_done")
-    keyboard.adjust(1)
-
-    await callback.message.answer(
-        "Хотите оставить комментарий к оценке?",
-        reply_markup=keyboard.as_markup()
-    )
-
-
-@dp.callback_query(F.data == "feedback_comment")
-async def process_comment_request(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id in pending_feedback:
-        pending_feedback[user_id]["comment_requested"] = True
-    
-    await callback.message.answer(
-        "📝 Напишите ваш комментарий (или отправьте голосовым):"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "feedback_clarify")
-async def process_clarify_request(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-
-    if user_id in pending_feedback:
-        pending_feedback[user_id]["clarification_requested"] = True
-
-    await callback.message.answer(
-        "❓ Напишите ваш уточняющий вопрос, и я отправлю его в Qwen Code:"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "feedback_done")
-async def process_feedback_done(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-
-    # Log final feedback
-    if user_id in pending_feedback:
-        feedback = pending_feedback[user_id]
-        logger.info(f"Feedback completed for user {user_id}: {feedback}")
-
-        # Clear pending feedback
-        del pending_feedback[user_id]
-
-    await callback.message.answer("✅ Спасибо за обратную связь!")
-    await callback.answer()
-
-
-# Handle clarification messages
-@dp.message(F.text)
-async def process_clarification_text(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    clarification = message.text
-
-    # Check if in clarification mode
-    if user_id in pending_feedback and pending_feedback[user_id].get("clarification_requested"):
-        # Send clarification to Qwen Code
-        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-
-        # Get original context
-        original_prompt = ""
-        original_response = ""
-        if user_id in pending_feedback:
-            original_prompt = pending_feedback[user_id].get("prompt", "")
-            original_response = pending_feedback[user_id].get("response", "")
-
-        # Build clarification prompt
-        full_prompt = f"""
-Original request: {original_prompt}
-Original response: {original_response}
-
-User clarification question: {clarification}
-
-Please provide a more detailed or clarified answer.
-"""
-
-        response = await send_to_qwen_code(full_prompt, user_id)
-
-        if response:
-            await message.answer(
-                f"🤖 **Уточнённый ответ:**\n\n{response}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await request_feedback(message, response)
-        else:
-            await message.answer("❌ Ошибка при получении уточнённого ответа.")
-        return
-
-    # Check if in comment mode
-    if user_id in pending_feedback and pending_feedback[user_id].get("comment_requested"):
-        pending_feedback[user_id]["comment"] = clarification
-        pending_feedback[user_id]["comment_timestamp"] = datetime.now().isoformat()
-
-        logger.info(f"User {user_id} left comment: {clarification}")
-        await message.answer("✅ Спасибо за ваш комментарий!")
-
-        # Clear pending
-        del pending_feedback[user_id]
-        return
-
-    # Otherwise, treat as normal text message (handled by handle_text)
-    await handle_text(message)
-
-
-# Handle voice comments
-@dp.message(F.voice)
-async def handle_voice_comment(message: types.Message):
-    user_id = message.from_user.id
-
-    # Check if user is in feedback mode
-    if user_id in pending_feedback and pending_feedback[user_id].get("comment_requested"):
-        # Download and transcribe
-        voice = message.voice
-        file = await bot.get_file(voice.file_id)
-        audio_bytes = await bot.download_file(file.file_path)
-
-        text = await speech_to_text(audio_bytes.read())
-
-        if text:
-            pending_feedback[user_id]["comment"] = f"(voice) {text}"
-            await message.answer(f"✅ Комментарий принят: _{text}_", parse_mode=ParseMode.MARKDOWN)
-            del pending_feedback[user_id]
-        else:
-            await message.answer("❌ Не удалось распознать голосовой комментарий.")
-        return
-
-    # Otherwise, handle as normal voice message
-    await handle_voice(message)
 
 
 # ---------- Queue Monitor (optional background task) ----------

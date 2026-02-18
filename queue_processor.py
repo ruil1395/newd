@@ -56,7 +56,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
     """
-    Process request using Qwen Code CLI.
+    Process request using Qwen Code CLI (Russian language).
     """
     prompt = request_data.get("prompt", "")
     history = request_data.get("history", [])
@@ -68,7 +68,10 @@ async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
         content = msg.get("content", "")
         context += f"{role}: {content}\n"
     
-    logger.info(f"Sending to Qwen Code: {prompt[:100]}...")
+    # Add instruction to respond in Russian
+    russian_prompt = f"Отвечай на русском языке.\n\n{prompt}"
+    
+    logger.info(f"Sending to Qwen Code (RU): {russian_prompt[:100]}...")
     
     try:
         # Use full path to qwen CLI
@@ -78,7 +81,7 @@ async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
         proc = await asyncio.create_subprocess_exec(
             qwen_path,
             "--no-sandbox",  # Run without sandbox for Codespaces
-            prompt,
+            russian_prompt,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
@@ -102,7 +105,7 @@ async def process_with_qwen_cli(request_data: Dict[str, Any]) -> Optional[str]:
             partial = stdout.decode('utf-8').strip()
             if partial:
                 return partial
-            return f"Error: {error_msg}"
+            return f"Ошибка: {error_msg}"
             
     except FileNotFoundError:
         logger.warning("qwen CLI not found, trying without full path")
