@@ -55,6 +55,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📅 Записаться")],
             [KeyboardButton(text="📋 Мои записи"), KeyboardButton(text="❌ Отменить запись")],
+            [KeyboardButton(text="🎨 Открыть салон", web_app=types.WebAppInfo(url="https://ruil1395.github.io/Botest-/booking_bot/webapp/"))],
             [KeyboardButton(text="ℹ️ О нас"), KeyboardButton(text="📞 Контакты")],
         ],
         resize_keyboard=True

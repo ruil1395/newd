@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Запись на услуги</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            min-height: 100vh;
+            /* Кастомный фон - градиент */
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background-attachment: fixed;
+            color: #fff;
+            padding: 20px;
+        }
+
+        /* Или фон с изображением */
+        body.image-bg {
+            background: url('https://images.unsplash.com/photo-1560066984-138dadb4c035?w=800') center/cover fixed;
+        }
+
+        body.image-bg .container {
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(10px);
+        }
+
+        .container {
+            max-width: 400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            text-align: center;
+            opacity: 0.8;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .service-card {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 15px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .service-card:hover,
+        .service-card.selected {
+            background: rgba(255, 255, 255, 0.25);
+            border-color: #fff;
+            transform: translateY(-2px);
+        }
+
+        .service-name {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .service-info {
+            display: flex;
+            justify-content: space-between;
+            opacity: 0.8;
+            font-size: 14px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 20px;
+        }
+
+        .btn-primary {
+            background: #fff;
+            color: #667eea;
+        }
+
+        .btn-primary:hover {
+            transform: scale(1.02);
+            box-shadow: 0 4px 20px rgba(255, 255, 255, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+            margin-top: 10px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .date-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .date-btn {
+            padding: 12px 8px;
+            background: rgba(255, 255, 255, 0.15);
+            border: 2px solid transparent;
+            border-radius: 10px;
+            color: #fff;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .date-btn:hover,
+        .date-btn.selected {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: #fff;
+        }
+
+        .date-day {
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        .date-num {
+            font-size: 16px;
+            font-weight: 600;
+            margin-top: 5px;
+        }
+
+        .time-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .time-btn {
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.15);
+            border: 2px solid transparent;
+            border-radius: 8px;
+            color: #fff;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .time-btn:hover,
+        .time-btn.selected {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: #fff;
+        }
+
+        .time-btn.booked {
+            opacity: 0.3;
+            cursor: not-allowed;
+            text-decoration: line-through;
+        }
+
+        .step {
+            margin-bottom: 25px;
+        }
+
+        .step-title {
+            font-size: 16px;
+            margin-bottom: 15px;
+            opacity: 0.9;
+        }
+
+        .confirmation {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .confirmation-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .confirmation-row:last-child {
+            border-bottom: none;
+        }
+
+        .success-icon {
+            font-size: 60px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        /* Анимации */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease forwards;
+        }
+    </style>
+</head>
+<body>
+    <div class="container fade-in">
+        <h1>💆 Салон красоты</h1>
+        <p class="subtitle">Запись на услуги онлайн</p>
+
+        <!-- Шаг 1: Выбор услуги -->
+        <div id="step-service" class="step fade-in">
+            <div class="step-title">💆 Выберите услугу:</div>
+            <div class="service-card" data-service="consultation">
+                <div class="service-name">📋 Консультация</div>
+                <div class="service-info">
+                    <span>30 мин</span>
+                    <span>1000₽</span>
+                </div>
+            </div>
+            <div class="service-card" data-service="haircut">
+                <div class="service-name">✂️ Стрижка</div>
+                <div class="service-info">
+                    <span>60 мин</span>
+                    <span>1500₽</span>
+                </div>
+            </div>
+            <div class="service-card" data-service="manicure">
+                <div class="service-name">💅 Маникюр</div>
+                <div class="service-info">
+                    <span>90 мин</span>
+                    <span>2000₽</span>
+                </div>
+            </div>
+            <div class="service-card" data-service="massage">
+                <div class="service-name">💆 Массаж</div>
+                <div class="service-info">
+                    <span>60 мин</span>
+                    <span>2500₽</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Шаг 2: Выбор даты -->
+        <div id="step-date" class="step hidden fade-in">
+            <div class="step-title">📅 Выберите дату:</div>
+            <div class="date-grid" id="date-grid"></div>
+            <button class="btn btn-secondary" onclick="backToService()">← Назад</button>
+        </div>
+
+        <!-- Шаг 3: Выбор времени -->
+        <div id="step-time" class="step hidden fade-in">
+            <div class="step-title">🕐 Выберите время:</div>
+            <div class="time-grid" id="time-grid"></div>
+            <button class="btn btn-secondary" onclick="backToDate()">← Назад</button>
+        </div>
+
+        <!-- Шаг 4: Подтверждение -->
+        <div id="step-confirm" class="step hidden fade-in">
+            <div class="step-title">📋 Подтверждение:</div>
+            <div class="confirmation">
+                <div class="confirmation-row">
+                    <span>Услуга:</span>
+                    <span id="confirm-service"></span>
+                </div>
+                <div class="confirmation-row">
+                    <span>Дата:</span>
+                    <span id="confirm-date"></span>
+                </div>
+                <div class="confirmation-row">
+                    <span>Время:</span>
+                    <span id="confirm-time"></span>
+                </div>
+                <div class="confirmation-row">
+                    <span>Итого:</span>
+                    <span id="confirm-price"></span>
+                </div>
+            </div>
+            <button class="btn btn-primary" onclick="confirmBooking()">✅ Подтвердить запись</button>
+            <button class="btn btn-secondary" onclick="backToTime()">← Назад</button>
+        </div>
+
+        <!-- Шаг 5: Успех -->
+        <div id="step-success" class="step hidden fade-in">
+            <div class="success-icon">✅</div>
+            <h2 style="text-align: center; margin-bottom: 10px;">Запись подтверждена!</h2>
+            <p style="text-align: center; opacity: 0.8;">Ждём вас в назначенное время!</p>
+        </div>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
+
+        // Данные
+        let selectedService = null;
+        let selectedDate = null;
+        let selectedTime = null;
+
+        const services = {
+            consultation: { name: '📋 Консультация', duration: 30, price: 1000 },
+            haircut: { name: '✂️ Стрижка', duration: 60, price: 1500 },
+            manicure: { name: '💅 Маникюр', duration: 90, price: 2000 },
+            massage: { name: '💆 Массаж', duration: 60, price: 2500 }
+        };
+
+        // Выбор услуги
+        document.querySelectorAll('.service-card').forEach(card => {
+            card.addEventListener('click', () => {
+                selectedService = card.dataset.service;
+                document.querySelectorAll('.service-card').forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                showStep('date');
+                generateDates();
+            });
+        });
+
+        // Генерация дат
+        function generateDates() {
+            const grid = document.getElementById('date-grid');
+            grid.innerHTML = '';
+            const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+            
+            for (let i = 0; i < 7; i++) {
+                const date = new Date();
+                date.setDate(date.getDate() + i);
+                
+                const dayName = days[date.getDay()];
+                const dayNum = date.getDate().toString().padStart(2, '0');
+                const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                const fullDate = date.toISOString().split('T')[0];
+
+                const btn = document.createElement('div');
+                btn.className = 'date-btn';
+                btn.innerHTML = `
+                    <div class="date-day">${dayName}</div>
+                    <div class="date-num">${dayNum}.${month}</div>
+                `;
+                btn.addEventListener('click', () => {
+                    selectedDate = fullDate;
+                    document.querySelectorAll('.date-btn').forEach(d => d.classList.remove('selected'));
+                    btn.classList.add('selected');
+                    showStep('time');
+                    generateTimes();
+                });
+                grid.appendChild(btn);
+            }
+        }
+
+        // Генерация времени
+        function generateTimes() {
+            const grid = document.getElementById('time-grid');
+            grid.innerHTML = '';
+            const times = ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30', 
+                          '12:00', '12:30', '13:00', '13:30', '14:00', '14:30',
+                          '15:00', '15:30', '16:00', '16:30', '17:00', '17:30',
+                          '18:00', '18:30', '19:00', '19:30'];
+            
+            // Имитация занятых слотов (в реальности - запрос к API)
+            const bookedTimes = ['10:00', '14:30', '18:00'];
+
+            times.forEach(time => {
+                const btn = document.createElement('div');
+                btn.className = 'time-btn' + (bookedTimes.includes(time) ? ' booked' : '');
+                btn.textContent = time;
+                if (!bookedTimes.includes(time)) {
+                    btn.addEventListener('click', () => {
+                        selectedTime = time;
+                        document.querySelectorAll('.time-btn').forEach(t => t.classList.remove('selected'));
+                        btn.classList.add('selected');
+                        showStep('confirm');
+                        updateConfirmation();
+                    });
+                }
+            });
+        }
+
+        // Обновление подтверждения
+        function updateConfirmation() {
+            const service = services[selectedService];
+            document.getElementById('confirm-service').textContent = service.name;
+            document.getElementById('confirm-date').textContent = selectedDate;
+            document.getElementById('confirm-time').textContent = selectedTime;
+            document.getElementById('confirm-price').textContent = service.price + '₽';
+        }
+
+        // Подтверждение записи
+        function confirmBooking() {
+            // Отправка данных боту
+            tg.sendData(JSON.stringify({
+                service: selectedService,
+                date: selectedDate,
+                time: selectedTime
+            }));
+            showStep('success');
+        }
+
+        // Навигация
+        function showStep(step) {
+            ['service', 'date', 'time', 'confirm', 'success'].forEach(s => {
+                document.getElementById('step-' + s).classList.add('hidden');
+            });
+            document.getElementById('step-' + step).classList.remove('hidden');
+        }
+
+        function backToService() {
+            selectedService = null;
+            showStep('service');
+        }
+
+        function backToDate() {
+            selectedDate = null;
+            showStep('date');
+        }
+
+        function backToTime() {
+            selectedTime = null;
+            showStep('time');
+        }
+
+        // Настройка темы Telegram
+        document.body.style.backgroundColor = tg.themeParams.bg_color || '#667eea';
+    </script>
+</body>
+</html>
