@@ -4,8 +4,10 @@ Telegram Bot для записи на услуги
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Dict, Any
+from pathlib import Path
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -61,6 +63,10 @@ class AdminStates(StatesGroup):
     service_description = State()
     service_duration = State()
     service_price = State()
+    # Для редактирования
+    edit_field = State()
+    edit_value = State()
+    delete_confirm = State()
 
 
 # ---------- Keyboards ----------
@@ -1169,7 +1175,7 @@ async def admin_service_edit(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("admin_edit_"))
-async def admin_service_edit_select(callback: types.CallbackQuery):
+async def admin_service_edit_select(callback: types.CallbackQuery, state: FSMContext):
     """Выбор услуги для редактирования"""
     service_key = callback.data.replace("admin_edit_", "")
     all_services = {**SERVICES, **EXTRA_SERVICES}
@@ -1179,6 +1185,8 @@ async def admin_service_edit_select(callback: types.CallbackQuery):
         await callback.answer("❌ Услуга не найдена", show_alert=True)
         return
     
+    await state.update_data(edit_service_key=service_key)
+    
     text = (
         f"📝 **Редактирование услуги**\n\n"
         f"🔑 Ключ: `{service_key}`\n"
@@ -1186,35 +1194,227 @@ async def admin_service_edit_select(callback: types.CallbackQuery):
         f"⏱ Длительность: {service['duration']} мин\n"
         f"💰 Цена: {service['price']}₽\n"
         f"📄 Описание: {service['description']}\n\n"
-        f"⚠️ Для редактирования измените значения в файле `config.py`"
+        f"**Выберите поле для изменения:**"
     )
     
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Название", callback_data="edit_field_name")],
+            [InlineKeyboardButton(text="⏱ Длительность", callback_data="edit_field_duration")],
+            [InlineKeyboardButton(text="💰 Цена", callback_data="edit_field_price")],
+            [InlineKeyboardButton(text="📄 Описание", callback_data="edit_field_description")],
             [InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")],
         ]),
         parse_mode=ParseMode.MARKDOWN
     )
+    await state.set_state(AdminStates.edit_field)
+
+
+@dp.callback_query(F.data.startswith("edit_field_"))
+async def admin_edit_field_select(callback: types.CallbackQuery, state: FSMContext):
+    """Выбор поля для редактирования"""
+    field = callback.data.replace("edit_field_", "")
+    data = await state.get_data()
+    service_key = data.get('edit_service_key')
+    
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    service = all_services.get(service_key)
+    
+    if not service:
+        await callback.answer("❌ Услуга не найдена", show_alert=True)
+        return
+    
+    await state.update_data(edit_field=field)
+    
+    field_names = {
+        'name': 'название',
+        'duration': 'длительность (в минутах)',
+        'price': 'цену (в рублях)',
+        'description': 'описание'
+    }
+    
+    current_value = service.get(field, 'Нет')
+    
+    await callback.message.edit_text(
+        f"✏️ **Изменение: {field_names.get(field, field)}**\n\n"
+        f"Текущее значение: `{current_value}`\n\n"
+        f"Введите **новое значение**:",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(AdminStates.edit_value)
+
+
+@dp.message(AdminStates.edit_value, F.text)
+async def admin_edit_save(message: types.Message, state: FSMContext):
+    """Сохранение изменений"""
+    data = await state.get_data()
+    service_key = data.get('edit_service_key')
+    field = data.get('edit_field')
+    new_value = message.text.strip()
+    
+    # Читаем config.py
+    config_path = Path("./config.py")
+    if not config_path.exists():
+        config_path = Path("/workspaces/newd/booking_bot/config.py")
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Преобразуем значение
+        if field in ['duration', 'price']:
+            new_value = int(new_value)
+            old_pattern = f'"{field}": {service_key}'
+        elif field == 'name':
+            old_pattern = f'"name": "{service_key}'
+        else:
+            old_pattern = f'"description": "{service_key}'
+        
+        # Ищем и заменяем значение в SERVICES или EXTRA_SERVICES
+        # Находим текущее значение
+        pattern = rf'("{service_key}".*?)"{field}":\s*("[^"]*"|\d+)'
+        match = re.search(pattern, content, re.DOTALL)
+        
+        if match:
+            if field in ['duration', 'price']:
+                replacement = f'{match.group(1)}"{field}": {new_value}'
+            else:
+                replacement = f'{match.group(1)}"{field}": "{new_value}"'
+            
+            content = content.replace(match.group(0), replacement)
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            await message.answer(
+                f"✅ **Изменено!**\n\n"
+                f"🔑 Услуга: `{service_key}`\n"
+                f"📝 {field}: `{new_value}`\n\n"
+                f"⚠️ **Перезапустите бота** для применения изменений!",
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await message.answer(
+                f"❌ Не удалось найти услугу в config.py\n\n"
+                f"Возможно, услуга имеет другой формат.\n"
+                f"Измените вручную в файле config.py",
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        await state.clear()
+        
+    except Exception as e:
+        logger.exception(f"Error editing service: {e}")
+        await message.answer(
+            f"❌ Ошибка при редактировании: {e}\n\n"
+            f"Измените вручную в config.py",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
 
 
 @dp.callback_query(F.data == "admin_service_delete")
-async def admin_service_delete(callback: types.CallbackQuery):
+async def admin_service_delete(callback: types.CallbackQuery, state: FSMContext):
     """Удаление услуги"""
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    
+    keyboard = []
+    for key, service in all_services.items():
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"❌ {service['name']}",
+                callback_data=f"admin_delete_{key}"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")])
+    
     await callback.message.edit_text(
         "❌ **Удаление услуги**\n\n"
-        "⚠️ Удаление услуг возможно только в файле `config.py`\n\n"
-        "1. Откройте `config.py`\n"
-        "2. Найдите нужную услугу в `SERVICES` или `EXTRA_SERVICES`\n"
-        "3. Удалите или закомментируйте строку\n"
-        "4. Перезапустите бота\n\n"
-        "📄 Текущие услуги можно посмотреть в разделе '📋 Список услуг'",
+        "⚠️ Выберите услугу для удаления:\n\n"
+        "После выбора услуга будет удалена из config.py",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_delete_"))
+async def admin_service_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждение удаления услуги"""
+    service_key = callback.data.replace("admin_delete_", "")
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    service = all_services.get(service_key)
+    
+    if not service:
+        await callback.answer("❌ Услуга не найдена", show_alert=True)
+        return
+    
+    await state.update_data(delete_service_key=service_key, delete_service_name=service['name'])
+    
+    await callback.message.edit_text(
+        f"⚠️ **Вы уверены?**\n\n"
+        f"Будет удалена услуга:\n"
+        f"🔑 Ключ: `{service_key}`\n"
+        f"📝 Название: {service['name']}\n"
+        f"💰 Цена: {service['price']}₽\n\n"
+        f"Это действие нельзя отменить!",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Список услуг", callback_data="admin_service_list")],
-            [InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")],
+            [InlineKeyboardButton(text="❌ Да, удалить", callback_data="delete_confirm_yes")],
+            [InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_service_delete")],
         ]),
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+@dp.callback_query(F.data == "delete_confirm_yes")
+async def admin_service_delete_execute(callback: types.CallbackQuery, state: FSMContext):
+    """Удаление услуги из config.py"""
+    data = await state.get_data()
+    service_key = data.get('delete_service_key')
+    
+    config_path = Path("./config.py")
+    if not config_path.exists():
+        config_path = Path("/workspaces/newd/booking_bot/config.py")
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Находим и удаляем услугу
+        # Паттерн для поиска блока услуги
+        pattern = rf'"{service_key}":\s*\{{[^}}]*\}},?\s*\n'
+        match = re.search(pattern, content, re.DOTALL)
+        
+        if match:
+            content = content.replace(match.group(0), '')
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            await callback.message.edit_text(
+                f"✅ **Услуга удалена!**\n\n"
+                f"🔑 Ключ: `{service_key}`\n\n"
+                f"⚠️ **Перезапустите бота** для применения изменений!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.message.edit_text(
+                f"❌ Не удалось найти услугу в config.py\n\n"
+                f"Удалите вручную из файла config.py",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        await state.clear()
+        
+    except Exception as e:
+        logger.exception(f"Error deleting service: {e}")
+        await callback.message.edit_text(
+            f"❌ Ошибка при удалении: {e}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await state.clear()
 
 
 # ---------- Reminder System ----------
