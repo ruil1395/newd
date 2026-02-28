@@ -92,7 +92,7 @@ def get_services_keyboard() -> InlineKeyboardMarkup:
         keyboard.append([
             InlineKeyboardButton(
                 text=f"{service['name']} ({service['duration']} мин) - {service['price']}₽",
-                callback_data=f"service_{key}"
+                callback_data=f"svc_{key}"
             )
         ])
     keyboard.append([InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main")])
@@ -301,18 +301,22 @@ async def start_booking(message: types.Message, state: FSMContext):
     await state.set_state(BookingStates.selecting_service)
 
 
-@dp.callback_query(F.data.startswith("service_"))
+@dp.callback_query(F.data.startswith("svc_"))
 async def service_selected(callback: types.CallbackQuery, state: FSMContext):
     """Выбор услуги"""
-    service_key = callback.data.replace("service_", "")
+    service_key = callback.data.replace("svc_", "")
+    logger.info(f"Callback received: {callback.data}, service_key: {service_key}")
+    logger.info(f"Available SERVICES keys: {list(SERVICES.keys())}")
+    
     service = SERVICES.get(service_key)
-    
+
     if not service:
-        await callback.answer("❌ Услуга не найдена", show_alert=True)
+        logger.warning(f"Service {service_key} not found!")
+        await callback.answer(f"❌ Услуга не найдена: {service_key}", show_alert=True)
         return
-    
+
     await state.update_data(service_key=service_key, service_name=service['name'])
-    
+
     await callback.message.edit_text(
         f"✅ Выбрано: **{service['name']}**\n"
         f"⏱ Длительность: {service['duration']} мин\n"
