@@ -1,0 +1,8 @@
+# Telegram Bot
+aiogram>=3.0.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Timezone support
+pytz>=2023.3
