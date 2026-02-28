@@ -13,11 +13,11 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from aiogram.enums import ParseMode
 
 from config import (
-    BOT_TOKEN, ADMIN_ID, SERVICES, WORK_HOURS, 
+    BOT_TOKEN, ADMIN_ID, SERVICES, EXTRA_SERVICES, WORK_HOURS, 
     WORK_DAYS, DAYS_AHEAD, SLOT_INTERVAL, TIMEZONE
 )
 from database import Database
@@ -48,13 +48,30 @@ class BookingStates(StatesGroup):
     confirming = State()
 
 
+class ReviewStates(StatesGroup):
+    rating = State()
+    comment = State()
+    photo = State()
+
+
+class AdminStates(StatesGroup):
+    portfolio_photo = State()
+    portfolio_caption = State()
+    service_name = State()
+    service_description = State()
+    service_duration = State()
+    service_price = State()
+
+
 # ---------- Keyboards ----------
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     """Главное меню"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📅 Записаться")],
-            [KeyboardButton(text="📋 Мои записи"), KeyboardButton(text="❌ Отменить запись")],
+            [KeyboardButton(text="💆 Услуги"), KeyboardButton(text="⭐ Отзывы")],
+            [KeyboardButton(text="📸 Портфолио"), KeyboardButton(text="📋 Мои записи")],
+            [KeyboardButton(text="❌ Отменить запись")],
             [KeyboardButton(text="🎨 Открыть салон", web_app=types.WebAppInfo(url="https://ruil1395.github.io/newd/booking_bot/webapp/index.html"))],
             [KeyboardButton(text="ℹ️ О нас"), KeyboardButton(text="📞 Контакты")],
         ],
@@ -591,6 +608,409 @@ async def back_to_main(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "🏠 **Главное меню**",
         reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ========== РАЗДЕЛ: УСЛУГИ ==========
+
+def get_services_list_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура со списком всех услуг"""
+    keyboard = []
+    
+    # Основные услуги
+    for key, service in SERVICES.items():
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{service['name']} - {service['price']}₽",
+                callback_data=f"service_detail_{key}"
+            )
+        ])
+    
+    # Дополнительные услуги
+    if EXTRA_SERVICES:
+        keyboard.append([InlineKeyboardButton(text="➖" * 15, callback_data="ignore")])
+        for key, service in EXTRA_SERVICES.items():
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{service['name']} - {service['price']}₽",
+                    callback_data=f"service_detail_{key}"
+                )
+            ])
+    
+    keyboard.append([InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+@dp.message(F.text == "💆 Услуги")
+async def show_services(message: types.Message):
+    """Показать все услуги"""
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    
+    text = "💆 **Наши услуги:**\n\n"
+    
+    text += "**📋 Основные услуги:**\n"
+    for service in SERVICES.values():
+        text += f"• {service['name']} - {service['duration']} мин - {service['price']}₽\n"
+    
+    if EXTRA_SERVICES:
+        text += "\n**🎨 Дополнительные услуги:**\n"
+        for service in EXTRA_SERVICES.values():
+            text += f"• {service['name']} - {service['duration']} мин - {service['price']}₽\n"
+    
+    text += "\n_Нажмите на услугу для подробностей_ 👇"
+    
+    await message.answer(
+        text,
+        reply_markup=get_services_list_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data.startswith("service_detail_"))
+async def show_service_detail(callback: types.CallbackQuery):
+    """Показать подробности услуги"""
+    service_key = callback.data.replace("service_detail_", "")
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    
+    service = all_services.get(service_key)
+    if not service:
+        await callback.answer("❌ Услуга не найдена", show_alert=True)
+        return
+    
+    text = (
+        f"{service['name']}\n\n"
+        f"⏱ **Длительность:** {service['duration']} мин\n"
+        f"💰 **Цена:** {service['price']}₽\n\n"
+        f"📝 **Описание:**\n"
+        f"{service['description']}\n\n"
+        f"📅 **Записаться на эту услугу:**"
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📅 Записаться", callback_data=f"service_{service_key}")],
+            [InlineKeyboardButton(text="❌ Назад", callback_data="back_to_services")]
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "back_to_services")
+async def back_to_services(callback: types.CallbackQuery):
+    """Назад к списку услуг"""
+    await show_services(callback.message)
+
+
+# ========== РАЗДЕЛ: ОТЗЫВЫ ==========
+
+def get_rating_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с оценками"""
+    keyboard = []
+    row = []
+    for i in range(1, 6):
+        row.append(InlineKeyboardButton(text=f"{i}⭐", callback_data=f"rating_{i}"))
+        if len(row) >= 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+@dp.message(F.text == "⭐ Отзывы")
+async def show_reviews(message: types.Message):
+    """Показать отзывы"""
+    reviews = db.get_reviews(limit=10)
+    avg_rating = db.get_average_rating()
+    
+    if not reviews:
+        text = (
+            "⭐ **Отзывы**\n\n"
+            "Пока нет отзывов. Будьте первым!\n\n"
+            "📝 **Оставьте отзыв:**"
+        )
+    else:
+        text = f"⭐ **Отзывы клиентов** (средний рейтинг: {avg_rating}⭐)\n\n"
+        for i, review in enumerate(reviews[:5], 1):
+            stars = "⭐" * review['rating']
+            name = review.get('first_name', 'Клиент')
+            text += f"{i}. {stars} — {name}\n"
+            if review.get('comment'):
+                text += f"   _{review['comment']}_\n"
+            text += "\n"
+        text += "📝 **Оставьте свой отзыв:**"
+    
+    await message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Оставить отзыв", callback_data="write_review")],
+            [InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main")]
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "write_review")
+async def start_review(callback: types.CallbackQuery, state: FSMContext):
+    """Начать писать отзыв"""
+    await state.clear()
+    await callback.message.edit_text(
+        "⭐ **Оставьте отзыв**\n\n"
+        "Оцените нашу работу от 1 до 5 звёзд:",
+        reply_markup=get_rating_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(ReviewStates.rating)
+
+
+@dp.callback_query(F.data.startswith("rating_"))
+async def set_rating(callback: types.CallbackQuery, state: FSMContext):
+    """Установить оценку"""
+    rating = int(callback.data.replace("rating_", ""))
+    await state.update_data(rating=rating)
+    
+    stars = "⭐" * rating
+    await callback.message.edit_text(
+        f"{stars} Вы поставили оценку: **{rating}**\n\n"
+        "📝 **Напишите ваш отзыв:**\n"
+        "(или отправьте /skip чтобы пропустить)",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(ReviewStates.comment)
+
+
+@dp.message(ReviewStates.comment, F.text)
+async def save_comment(message: types.Message, state: FSMContext):
+    """Сохранить комментарий"""
+    if message.text == "/skip":
+        await save_review(message, state, comment=None)
+        return
+    
+    await state.update_data(comment=message.text)
+    await save_review(message, state, comment=message.text)
+
+
+async def save_review(message: types.Message, state: FSMContext, comment=None):
+    """Сохранить отзыв"""
+    data = await state.get_data()
+    user = message.from_user
+    
+    review_id = db.add_review(
+        user_id=user.id,
+        username=user.username or "",
+        first_name=user.first_name or "",
+        rating=data['rating'],
+        comment=comment
+    )
+    
+    stars = "⭐" * data['rating']
+    await message.answer(
+        f"✅ **Спасибо за отзыв!**\n\n"
+        f"Ваша оценка: {stars}\n"
+        f"Отзыв отправлен на модерацию.\n\n"
+        f"ID отзыва: #{review_id}",
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Уведомить админа
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"📝 **Новый отзыв!**\n\n"
+                     f"👤 {user.first_name} (@{user.username})\n"
+                     f"⭐ Оценка: {data['rating']}/5\n"
+                     f"📝 Комментарий: {comment or 'Без комментария'}\n\n"
+                     f"ID: #{review_id}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin about review: {e}")
+    
+    await state.clear()
+
+
+# ========== РАЗДЕЛ: ПОРТФОЛИО ==========
+
+@dp.message(F.text == "📸 Портфолио")
+async def show_portfolio(message: types.Message):
+    """Показать портфолио работ"""
+    portfolio = db.get_portfolio(limit=10)
+    
+    if not portfolio:
+        await message.answer(
+            "📸 **Портфолио**\n\n"
+            "Пока нет работ в портфолио.\n"
+            "Заходите позже! 🙏",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Показываем первое фото с описанием
+    item = portfolio[0]
+    caption = f"📸 **Портфолио**\n\n{item.get('caption', 'Без описания')}\n\n"
+    
+    if len(portfolio) > 1:
+        caption += f"_Фото 1 из {len(portfolio)}_\n\n"
+        caption += "Используйте кнопки для навигации 👇"
+    
+    keyboard = []
+    if len(portfolio) > 1:
+        keyboard.append([
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="portfolio_prev_0"),
+            InlineKeyboardButton(text="➡️ Вперёд", callback_data="portfolio_next_0")
+        ])
+    keyboard.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="back_to_main")])
+    
+    # Отправляем фото
+    try:
+        await bot.send_photo(
+            chat_id=message.chat.id,
+            photo=item['photo_id'],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Failed to send portfolio photo: {e}")
+        await message.answer("❌ Ошибка при загрузке фото", reply_markup=get_main_keyboard())
+
+
+@dp.callback_query(F.data.startswith("portfolio_"))
+async def navigate_portfolio(callback: types.CallbackQuery):
+    """Навигация по портфолио"""
+    action, idx = callback.data.replace("portfolio_", "").split("_")
+    idx = int(idx)
+    
+    portfolio = db.get_portfolio(limit=10)
+    if not portfolio:
+        await callback.answer("Нет работ", show_alert=True)
+        return
+    
+    if action == "next":
+        idx = min(idx + 1, len(portfolio) - 1)
+    elif action == "prev":
+        idx = max(idx - 1, 0)
+    
+    item = portfolio[idx]
+    caption = f"📸 **Портфолио**\n\n{item.get('caption', 'Без описания')}\n\n"
+    caption += f"_Фото {idx + 1} из {len(portfolio)}_"
+    
+    keyboard = []
+    if len(portfolio) > 1:
+        keyboard.append([
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"portfolio_prev_{idx}"),
+            InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"portfolio_next_{idx}")
+        ])
+    keyboard.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="back_to_main")])
+    
+    try:
+        await callback.message.edit_media(
+            media=types.InputMediaPhoto(media=item['photo_id'], caption=caption),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit portfolio media: {e}")
+
+
+# ========== АДМИН ПАНЕЛЬ ==========
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    """Админ панель"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    await message.answer(
+        "⚙️ **Админ панель**\n\n"
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📸 Добавить работу", callback_data="admin_add_portfolio")],
+            [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "admin_add_portfolio")
+async def admin_add_portfolio(callback: types.CallbackQuery, state: FSMContext):
+    """Добавить работу в портфолио"""
+    await state.clear()
+    await callback.message.edit_text(
+        "📸 **Добавить работу в портфолио**\n\n"
+        "Отправьте фото вашей работы:",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(AdminStates.portfolio_photo)
+
+
+@dp.message(AdminStates.portfolio_photo, F.photo)
+async def save_portfolio_photo(message: types.Message, state: FSMContext):
+    """Сохранить фото портфолио"""
+    photo_id = message.photo[-1].file_id
+    await state.update_data(photo_id=photo_id)
+    
+    await message.answer(
+        "📝 **Введите описание работы:**\n"
+        "(или отправьте /skip чтобы пропустить)",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(AdminStates.portfolio_caption)
+
+
+@dp.message(AdminStates.portfolio_caption, F.text)
+async def save_portfolio_caption(message: types.Message, state: FSMContext):
+    """Сохранить описание работы"""
+    if message.text == "/skip":
+        await save_portfolio_item(message, state, caption=None)
+        return
+    
+    await state.update_data(caption=message.text)
+    await save_portfolio_item(message, state, caption=message.text)
+
+
+async def save_portfolio_item(message: types.Message, state: FSMContext, caption=None):
+    """Сохранить работу в портфолио"""
+    data = await state.get_data()
+    
+    item_id = db.add_portfolio_item(
+        photo_id=data['photo_id'],
+        caption=caption
+    )
+    
+    await message.answer(
+        f"✅ **Работа добавлена в портфолио!**\n\n"
+        f"ID: #{item_id}",
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.clear()
+
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: types.CallbackQuery):
+    """Статистика"""
+    total_appointments = len(db.get_all_active_appointments())
+    total_reviews = len(db.get_reviews(limit=1000))
+    avg_rating = db.get_average_rating()
+    total_portfolio = len(db.get_portfolio(limit=1000))
+    
+    text = (
+        "📊 **Статистика**\n\n"
+        f"📅 Активных записей: {total_appointments}\n"
+        f"⭐ Отзывов: {total_reviews}\n"
+        f"🏆 Средний рейтинг: {avg_rating}⭐\n"
+        f"📸 Работ в портфолио: {total_portfolio}"
+    )
+    
+    await callback.message.edit_text(
+        text,
         parse_mode=ParseMode.MARKDOWN
     )
 
