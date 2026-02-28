@@ -1000,7 +1000,7 @@ async def admin_stats(callback: types.CallbackQuery):
     total_reviews = len(db.get_reviews(limit=1000))
     avg_rating = db.get_average_rating()
     total_portfolio = len(db.get_portfolio(limit=1000))
-    
+
     text = (
         "📊 **Статистика**\n\n"
         f"📅 Активных записей: {total_appointments}\n"
@@ -1008,9 +1008,211 @@ async def admin_stats(callback: types.CallbackQuery):
         f"🏆 Средний рейтинг: {avg_rating}⭐\n"
         f"📸 Работ в портфолио: {total_portfolio}"
     )
+
+    await callback.message.edit_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ========== УПРАВЛЕНИЕ УСЛУГАМИ ==========
+
+@dp.callback_query(F.data == "admin_services")
+async def admin_services_menu(callback: types.CallbackQuery):
+    """Меню управления услугами"""
+    await callback.message.edit_text(
+        "📋 **Управление услугами**\n\n"
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить услугу", callback_data="admin_service_add")],
+            [InlineKeyboardButton(text="📝 Редактировать услугу", callback_data="admin_service_edit")],
+            [InlineKeyboardButton(text="❌ Удалить услугу", callback_data="admin_service_delete")],
+            [InlineKeyboardButton(text="📋 Список услуг", callback_data="admin_service_list")],
+            [InlineKeyboardButton(text="❌ Назад", callback_data="admin")],
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "admin_service_list")
+async def admin_service_list(callback: types.CallbackQuery):
+    """Список всех услуг"""
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    
+    text = "📋 **Все услуги:**\n\n"
+    for key, service in all_services.items():
+        text += f"**{key}**: {service['name']}\n"
+        text += f"  ⏱ {service['duration']} мин | 💰 {service['price']}₽\n"
+        text += f"  _{service['description']}_\n\n"
     
     await callback.message.edit_text(
         text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")],
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "admin_service_add")
+async def admin_service_add_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начать добавление услуги"""
+    await state.clear()
+    await callback.message.edit_text(
+        "➕ **Добавление новой услуги**\n\n"
+        "Введите **ключ услуги** (латиницей, без пробелов):\n"
+        "Пример: `consultation`, `haircut_premium`, `service_5`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(AdminStates.service_name)
+
+
+@dp.message(AdminStates.service_name, F.text)
+async def admin_service_add_key(message: types.Message, state: FSMContext):
+    """Сохранить ключ услуги"""
+    key = message.text.strip().lower().replace(' ', '_')
+    await state.update_data(service_key=key)
+    
+    await message.answer(
+        f"✅ Ключ: `{key}`\n\n"
+        "Теперь введите **название услуги**:\n"
+        "Пример: `Стрижка женская`, `Консультация юриста`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(AdminStates.service_description)
+
+
+@dp.message(AdminStates.service_description, F.text)
+async def admin_service_add_name(message: types.Message, state: FSMContext):
+    """Сохранить название услуги"""
+    await state.update_data(service_name=message.text.strip())
+    
+    await message.answer(
+        f"✅ Название: `{message.text.strip()}`\n\n"
+        "Введите **длительность** (в минутах):\n"
+        "Пример: `60`, `90`, `30`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.set_state(AdminStates.service_duration)
+
+
+@dp.message(AdminStates.service_duration, F.text)
+async def admin_service_add_duration(message: types.Message, state: FSMContext):
+    """Сохранить длительность"""
+    try:
+        duration = int(message.text.strip())
+        await state.update_data(service_duration=duration)
+        
+        await message.answer(
+            f"✅ Длительность: `{duration}` мин\n\n"
+            "Введите **цену** (в рублях):\n"
+            "Пример: `1500`, `2000`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await state.set_state(AdminStates.service_price)
+    except ValueError:
+        await message.answer("❌ Введите число! Попробуйте ещё раз:")
+
+
+@dp.message(AdminStates.service_price, F.text)
+async def admin_service_add_price(message: types.Message, state: FSMContext):
+    """Сохранить цену и создать услугу"""
+    try:
+        price = int(message.text.strip())
+        data = await state.get_data()
+        
+        # Добавляем услугу в БД
+        db.add_service(
+            key=data['service_key'],
+            name=data['service_name'],
+            description="Услуга добавлена через админ-панель",
+            duration=data['service_duration'],
+            price=price
+        )
+        
+        await message.answer(
+            f"✅ **Услуга добавлена!**\n\n"
+            f"🔑 Ключ: `{data['service_key']}`\n"
+            f"📝 Название: {data['service_name']}\n"
+            f"⏱ Длительность: {data['service_duration']} мин\n"
+            f"💰 Цена: {price}₽\n\n"
+            f"Теперь добавьте услугу в `config.py` для полноценной работы.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("❌ Введите число! Попробуйте ещё раз:")
+
+
+@dp.callback_query(F.data == "admin_service_edit")
+async def admin_service_edit(callback: types.CallbackQuery):
+    """Редактирование услуги"""
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    
+    keyboard = []
+    for key, service in all_services.items():
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{service['name']} - {service['price']}₽",
+                callback_data=f"admin_edit_{key}"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")])
+    
+    await callback.message.edit_text(
+        "📝 **Выберите услугу для редактирования:**",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_edit_"))
+async def admin_service_edit_select(callback: types.CallbackQuery):
+    """Выбор услуги для редактирования"""
+    service_key = callback.data.replace("admin_edit_", "")
+    all_services = {**SERVICES, **EXTRA_SERVICES}
+    service = all_services.get(service_key)
+    
+    if not service:
+        await callback.answer("❌ Услуга не найдена", show_alert=True)
+        return
+    
+    text = (
+        f"📝 **Редактирование услуги**\n\n"
+        f"🔑 Ключ: `{service_key}`\n"
+        f"📝 Название: {service['name']}\n"
+        f"⏱ Длительность: {service['duration']} мин\n"
+        f"💰 Цена: {service['price']}₽\n"
+        f"📄 Описание: {service['description']}\n\n"
+        f"⚠️ Для редактирования измените значения в файле `config.py`"
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")],
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "admin_service_delete")
+async def admin_service_delete(callback: types.CallbackQuery):
+    """Удаление услуги"""
+    await callback.message.edit_text(
+        "❌ **Удаление услуги**\n\n"
+        "⚠️ Удаление услуг возможно только в файле `config.py`\n\n"
+        "1. Откройте `config.py`\n"
+        "2. Найдите нужную услугу в `SERVICES` или `EXTRA_SERVICES`\n"
+        "3. Удалите или закомментируйте строку\n"
+        "4. Перезапустите бота\n\n"
+        "📄 Текущие услуги можно посмотреть в разделе '📋 Список услуг'",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Список услуг", callback_data="admin_service_list")],
+            [InlineKeyboardButton(text="❌ Назад", callback_data="admin_services")],
+        ]),
         parse_mode=ParseMode.MARKDOWN
     )
 
