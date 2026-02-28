@@ -939,9 +939,49 @@ async def cmd_admin(message: types.Message):
             [InlineKeyboardButton(text="📸 Добавить работу", callback_data="admin_add_portfolio")],
             [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="🔄 Перезапустить бота", callback_data="admin_restart")],
         ]),
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+@dp.callback_query(F.data == "admin_restart")
+async def admin_restart_bot(callback: types.CallbackQuery):
+    """Перезапуск бота"""
+    await callback.message.edit_text(
+        "🔄 **Перезапуск бота**\n\n"
+        "⚠️ Вы уверены?\n\n"
+        "Бот будет перезапущен в течение 5 секунд.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, перезапустить", callback_data="restart_confirm")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin")],
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.callback_query(F.data == "restart_confirm")
+async def admin_restart_confirm(callback: types.CallbackQuery):
+    """Подтверждение перезапуска"""
+    await callback.message.answer(
+        "🔄 Бот перезапускается...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Отправляем команду на перезапуск через subprocess
+    import subprocess
+    import sys
+    import os
+    
+    # Получаем путь к текущему скрипту
+    script_path = os.path.abspath(__file__)
+    
+    # Запускаем новый процесс
+    subprocess.Popen([sys.executable, script_path], start_new_session=True)
+    
+    # Завершаем текущий процесс
+    await asyncio.sleep(2)
+    os._exit(0)
 
 
 @dp.callback_query(F.data == "admin_add_portfolio")
@@ -1143,7 +1183,10 @@ async def admin_service_add_price(message: types.Message, state: FSMContext):
             f"⏱ Длительность: {data['service_duration']} мин\n"
             f"💰 Цена: {price}₽\n\n"
             f"Теперь добавьте услугу в `config.py` для полноценной работы.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить ещё", callback_data="admin_service_add")],
+                [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+            ]),
             parse_mode=ParseMode.MARKDOWN
         )
         await state.clear()
@@ -1265,11 +1308,10 @@ async def admin_edit_save(message: types.Message, state: FSMContext):
         # Преобразуем значение
         if field in ['duration', 'price']:
             new_value = int(new_value)
-            old_pattern = f'"{field}": {service_key}'
         elif field == 'name':
-            old_pattern = f'"name": "{service_key}'
+            pass
         else:
-            old_pattern = f'"description": "{service_key}'
+            pass
         
         # Ищем и заменяем значение в SERVICES или EXTRA_SERVICES
         # Находим текущее значение
@@ -1292,7 +1334,10 @@ async def admin_edit_save(message: types.Message, state: FSMContext):
                 f"🔑 Услуга: `{service_key}`\n"
                 f"📝 {field}: `{new_value}`\n\n"
                 f"⚠️ **Перезапустите бота** для применения изменений!",
-                reply_markup=get_main_keyboard(),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📝 Редактировать ещё", callback_data="admin_service_edit")],
+                    [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+                ]),
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
@@ -1300,7 +1345,9 @@ async def admin_edit_save(message: types.Message, state: FSMContext):
                 f"❌ Не удалось найти услугу в config.py\n\n"
                 f"Возможно, услуга имеет другой формат.\n"
                 f"Измените вручную в файле config.py",
-                reply_markup=get_main_keyboard(),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+                ]),
                 parse_mode=ParseMode.MARKDOWN
             )
         
@@ -1311,7 +1358,9 @@ async def admin_edit_save(message: types.Message, state: FSMContext):
         await message.answer(
             f"❌ Ошибка при редактировании: {e}\n\n"
             f"Измените вручную в config.py",
-            reply_markup=get_main_keyboard()
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+            ])
         )
         await state.clear()
 
@@ -1397,12 +1446,19 @@ async def admin_service_delete_execute(callback: types.CallbackQuery, state: FSM
                 f"✅ **Услуга удалена!**\n\n"
                 f"🔑 Ключ: `{service_key}`\n\n"
                 f"⚠️ **Перезапустите бота** для применения изменений!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Удалить ещё", callback_data="admin_service_delete")],
+                    [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+                ]),
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
             await callback.message.edit_text(
                 f"❌ Не удалось найти услугу в config.py\n\n"
                 f"Удалите вручную из файла config.py",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+                ]),
                 parse_mode=ParseMode.MARKDOWN
             )
         
@@ -1412,6 +1468,9 @@ async def admin_service_delete_execute(callback: types.CallbackQuery, state: FSM
         logger.exception(f"Error deleting service: {e}")
         await callback.message.edit_text(
             f"❌ Ошибка при удалении: {e}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Управление услугами", callback_data="admin_services")],
+            ]),
             parse_mode=ParseMode.MARKDOWN
         )
         await state.clear()
